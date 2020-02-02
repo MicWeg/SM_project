@@ -29,11 +29,12 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "arm_math.h"
+#include "math_helper.h"
 #include "stdio.h"
 #include "bmp280.h"
 #include "bmp280_defs.h"
 #include "sensor.h"
-
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,12 +49,23 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+#define TEST_LENGTH_SAMPLES  320
+#define SNR_THRESHOLD_F32    140.0f
+#define BLOCK_SIZE            32
+#define NUM_TAPS              29
+
+#define LD_SUCCESS_Pin LD1_Pin
+#define LD_ERROR_Pin   LD3_Pin
 
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+/* -------------------------------------------------------------------
+ * The input signal and reference output (computed with MATLAB)
+ * are defined externally in arm_fir_lpf_data.c.
+ * ------------------------------------------------------------------- */
 
 float tempi=0;
 //Testowe zmienne wywalic pozniej - i sprawdzic pozostale czy sa wykorzystwane
@@ -64,14 +76,48 @@ uint8_t odebrane;
 char bufor[2];
 int licznik=0;
 int pwm;
+float temp_zad=0;
 
+extern float32_t testInput_f32_1kHz_15kHz[TEST_LENGTH_SAMPLES];
+extern float32_t refOutput[TEST_LENGTH_SAMPLES];
 
+/* -------------------------------------------------------------------
+ * Declare Test output buffer
+ * ------------------------------------------------------------------- */
+
+static float32_t testOutput[TEST_LENGTH_SAMPLES];
+
+/* -------------------------------------------------------------------
+ * Declare State buffer of size (numTaps + blockSize - 1)
+ * ------------------------------------------------------------------- */
+
+static float32_t firStateF32[BLOCK_SIZE + NUM_TAPS - 1];
+
+/* ----------------------------------------------------------------------
+** FIR Coefficients buffer generated using fir1() MATLAB function.
+** fir1(28, 6/24)
+** ------------------------------------------------------------------- */
+
+const float32_t firCoeffs32[NUM_TAPS] = {
+  -0.0018225230f, -0.0015879294f, +0.0000000000f, +0.0036977508f, +0.0080754303f, +0.0085302217f, -0.0000000000f, -0.0173976984f,
+  -0.0341458607f, -0.0333591565f, +0.0000000000f, +0.0676308395f, +0.1522061835f, +0.2229246956f, +0.2504960933f, +0.2229246956f,
+  +0.1522061835f, +0.0676308395f, +0.0000000000f, -0.0333591565f, -0.0341458607f, -0.0173976984f, -0.0000000000f, +0.0085302217f,
+  +0.0080754303f, +0.0036977508f, +0.0000000000f, -0.0015879294f, -0.0018225230f
+};
+
+/* ------------------------------------------------------------------
+ * Global variables for FIR LPF Example
+ * ------------------------------------------------------------------- */
+
+uint32_t blockSize = BLOCK_SIZE;
+uint32_t numBlocks = TEST_LENGTH_SAMPLES/BLOCK_SIZE;
+
+float32_t  snr;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	//Wprowadzic kontrole - obecnie przy wyslaniu 1 cyfry bufor bedzie czekac na druga i np wysylajac 2 a potem 23 pwm=22
@@ -84,7 +130,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 		if(licznik==2)
 		{
-			pwm=atoi(bufor);
+			temp_zad=atoi(bufor);
 
 			licznik=0;
 		}
@@ -102,6 +148,62 @@ void send_string(char* s)
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+// EX 0
+arm_status CMSIS_FIR_UNITY_TEST(void)
+{
+  uint32_t i;
+  arm_fir_instance_f32 S;
+  arm_status status;
+  float32_t  *inputF32, *outputF32;
+  
+  /* Initialize input and output buffer pointers */
+  inputF32 = &testInput_f32_1kHz_15kHz[0];
+  outputF32 = &testOutput[0];
+
+  /* Call FIR init function to initialize the instance structure. */
+  arm_fir_init_f32(&S, NUM_TAPS, (float32_t *)&firCoeffs32[0], &firStateF32[0], blockSize);
+
+  /* ----------------------------------------------------------------------
+  ** Call the FIR process function for every blockSize samples
+  ** ------------------------------------------------------------------- */
+
+  for(i=0; i < numBlocks; i++)
+  {
+	arm_fir_f32(&S, inputF32 + (i * blockSize), outputF32 + (i * blockSize), blockSize);
+  }
+
+  /* ----------------------------------------------------------------------
+  ** Compare the generated output against the reference output computed
+  ** in MATLAB.
+  ** ------------------------------------------------------------------- */
+
+  snr = arm_snr_f32(&refOutput[0], &testOutput[0], TEST_LENGTH_SAMPLES);
+
+  if (snr < SNR_THRESHOLD_F32)
+  {
+	status = ARM_MATH_TEST_FAILURE;
+  }
+  else
+  {
+	status = ARM_MATH_SUCCESS;
+  }
+
+  return status;
+}
+
+// EX 1
+arm_status CMSIS_MATMLT_UNITY_TEST(void)
+{
+	// TODO
+	return ARM_MATH_TEST_FAILURE;
+}
+
+// EX 2
+arm_status CMSIS_IIR_UNITY_TEST(void)
+{
+	// TODO
+	return ARM_MATH_TEST_FAILURE;
+}
 
 /* USER CODE END 0 */
 
@@ -112,7 +214,11 @@ void send_string(char* s)
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+	float pid_error;
+			arm_pid_instance_f32 pid;
+			pid.Kp = 50;//100
+			pid.Ki = 0.01;//0.025
+			pid.Kd = 10;//20
   /* USER CODE END 1 */
   
 
@@ -122,7 +228,7 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  arm_pid_init_f32(&pid, 1);
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -134,94 +240,109 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_ETH_Init();
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
   MX_SPI4_Init();
+  MX_ETH_Init();
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   HAL_UART_Init(&huart3);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
+
+  if (CMSIS_FIR_UNITY_TEST() != ARM_MATH_SUCCESS)
+  {
+	  HAL_GPIO_WritePin(LD1_GPIO_Port, LD_ERROR_Pin, GPIO_PIN_SET);
+  }
+  else
+  {
+	  HAL_GPIO_WritePin(LD1_GPIO_Port, LD_SUCCESS_Pin, GPIO_PIN_SET);
+  }
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-
-  ////Ustawianie PWM
-  //////////////Potrzebne??? Receive_IT??
   HAL_UART_Receive_IT(&huart3, &odebrane, 1);
-  ///HAL byl wczesniej w USER CODE 2
-	int8_t rslt;
-	  	    struct bmp280_dev bmp;
-	  	    struct bmp280_config conf;
-	  	    struct bmp280_uncomp_data ucomp_data;
-	  	    uint32_t pres32, pres64;
-	  	    int32_t temp32;
-	  	    double temp;
-	  	    double pres;
 
-	  	bmp.delay_ms =&HAL_Delay;
-	  	bmp.dev_id = 0;
-	  	     bmp.read = spi_reg_read;
-	  	     bmp.write = spi_reg_write;
-	  	     bmp.intf = BMP280_SPI_INTF;
+  int8_t rslt;
+   	  	    struct bmp280_dev bmp;
+   	  	    struct bmp280_config conf;
+   	  	    struct bmp280_uncomp_data ucomp_data;
+   	  	    uint32_t pres32, pres64;
+   	  	    int32_t temp32;
+   	  	    double temp;
+   	  	    double pres;
+
+   	  	bmp.delay_ms =&HAL_Delay;
+   	  	bmp.dev_id = 0;
+   	  	     bmp.read = spi_reg_read;
+   	  	     bmp.write = spi_reg_write;
+   	  	     bmp.intf = BMP280_SPI_INTF;
 
 
-	  	     rslt = bmp280_init(&bmp);
-	  	         printf(" bmp280_init status", rslt);
+   	  	     rslt = bmp280_init(&bmp);
+   	  	         printf(" bmp280_init status", rslt);
 
-	  	         /* Always read the current settings before writing, especially when
-	  	          * all the configuration is not modified
-	  	          */
-	  	         rslt = bmp280_get_config(&conf, &bmp);
-	  	         printf(" bmp280_get_config status", rslt);
+   	  	         /* Always read the current settings before writing, especially when
+   	  	          * all the configuration is not modified
+   	  	          */
+   	  	         rslt = bmp280_get_config(&conf, &bmp);
+   	  	         printf(" bmp280_get_config status", rslt);
 
-	  	         /* configuring the temperature oversampling, filter coefficient and output data rate */
-	  	         /* Overwrite the desired settings */
-	  	         conf.filter = BMP280_FILTER_COEFF_2;
+   	  	         /* configuring the temperature oversampling, filter coefficient and output data rate */
+   	  	         /* Overwrite the desired settings */
+   	  	         conf.filter = BMP280_FILTER_COEFF_2;
 
-	  	         /* Temperature oversampling set at 4x */
-	  	         conf.os_temp = BMP280_OS_4X;
+   	  	         /* Temperature oversampling set at 4x */
+   	  	         conf.os_temp = BMP280_OS_4X;
 
-	  	         /* Pressure over sampling none (disabling pressure measurement) */
-	  	         conf.os_pres = BMP280_OS_4X;
+   	  	         /* Pressure over sampling none (disabling pressure measurement) */
+   	  	         conf.os_pres = BMP280_OS_4X;
 
-	  	         /* Setting the output data rate as 1HZ(1000ms) */
-	  	         conf.odr = BMP280_ODR_1000_MS;
-	  	         rslt = bmp280_set_config(&conf, &bmp);
-	  	         printf(" bmp280_set_config status", rslt);
+   	  	         /* Setting the output data rate as 1HZ(1000ms) */
+   	  	         conf.odr = BMP280_ODR_1000_MS;
+   	  	         rslt = bmp280_set_config(&conf, &bmp);
+   	  	         printf(" bmp280_set_config status", rslt);
 
-	  	         /* Always set the power mode after setting the configuration */
-	  	         rslt = bmp280_set_power_mode(BMP280_NORMAL_MODE, &bmp);
-	  	         printf(" bmp280_set_power_mode status", rslt);
-
+   	  	         /* Always set the power mode after setting the configuration */
+   	  	         rslt = bmp280_set_power_mode(BMP280_NORMAL_MODE, &bmp);
+   	  	         printf(" bmp280_set_power_mode status", rslt);
 
   while (1)
   {
 	  /* Reading the raw data from sensor */
-	          rslt = bmp280_get_uncomp_data(&ucomp_data, &bmp);
+	  	  	          rslt = bmp280_get_uncomp_data(&ucomp_data, &bmp);
 
-	          /* Getting the 32 bit compensated temperature */
-	          rslt = bmp280_get_comp_temp_32bit(&temp32, ucomp_data.uncomp_temp, &bmp);
+	  	  	          /* Getting the 32 bit compensated temperature */
+	  	  	          rslt = bmp280_get_comp_temp_32bit(&temp32, ucomp_data.uncomp_temp, &bmp);
 
-	          /* Getting the compensated temperature as floating point value */
-	          rslt = bmp280_get_comp_temp_double(&temp, ucomp_data.uncomp_temp, &bmp);
-	          tempi=temp;
-	         // printf("UT: %ld, T32: %ld, T: %f \r\n", ucomp_data.uncomp_temp, temp32, temp);
-/////////////////////////////////////////////////////////////
+	  	  	          /* Getting the compensated temperature as floating point value */
+	  	  	          rslt = bmp280_get_comp_temp_double(&temp, ucomp_data.uncomp_temp, &bmp);
+	  	  	          tempi=temp;
+	  	  	         // printf("UT: %ld, T32: %ld, T: %f \r\n", ucomp_data.uncomp_temp, temp32, temp);
+	  	  /////////////////////////////////////////////////////////////
 
-	                          char buffer[40];
-	                          int size=sprintf(buffer, "\rTemp: %lf\n", tempi);
-	                          ////Czy Transmit_IT
-	                          HAL_UART_Transmit(&huart3, (uint8_t*)buffer, size,100);
+	  	  	                          char buffer[40];
+	  	  	                          int size=sprintf(buffer, "\rTemp: %0.2f\n", tempi);
+	  	  	                          ////Czy Transmit_IT
+	  	  	                          HAL_UART_Transmit(&huart3, (uint8_t*)buffer, size,100);
 
-	          /* Sleep time between measurements = BMP280_ODR_1000_MS */
-	          bmp.delay_ms(1000);
-
-	    /*Regulacja i PWM*/
-	          //ustawienie pwm
-	          TIM3->CCR3=pwm;
-	          //dac do regulacji
+	  	  	          /* Sleep time between measurements = BMP280_ODR_1000_MS */
+	  	  	          bmp.delay_ms(1000);
+	  	  	          pid_error=temp_zad-tempi;
+	  	  	          pwm=arm_pid_f32(&pid,pid_error);
+	  	  	          if(pwm>100)
+	  	  	          {
+	  	  	        	  pwm=100;
+	  	  	          }
+	  	  	          else if (pwm <0)
+	  	  	          {
+	  	  	        	  pwm=0;
+	  	  	          }
+	  	  	    /*Regulacja i PWM*/
+	  	  	          //ustawienie pwm
+	  	  	          TIM3->CCR3=pwm;
+	  	  	          //dac do regulacji
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -294,7 +415,14 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-
+  HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+  while(1)
+  {
+	  HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+	  HAL_Delay(100);
+  }
   /* USER CODE END Error_Handler_Debug */
 }
 
